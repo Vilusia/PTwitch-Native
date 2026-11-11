@@ -20,6 +20,17 @@ int test_core(void)
     CHECK(ptwitch_decoder_fallback_allowed(360,true,false,true));
     CHECK(!ptwitch_decoder_fallback_allowed(240,true,false,true));
     CHECK(!ptwitch_decoder_fallback_allowed(360,true,false,false));
+    CHECK(!ptwitch_quality_recheck_due(false,240,1,30000001,30000000));
+    CHECK(!ptwitch_quality_recheck_due(true,360,1,30000001,30000000));
+    CHECK(!ptwitch_quality_recheck_due(true,240,0,30000000,30000000));
+    CHECK(!ptwitch_quality_recheck_due(true,240,1,29999999,30000000));
+    CHECK(!ptwitch_quality_recheck_due(true,240,2,1,30000000));
+    CHECK(ptwitch_quality_recheck_due(true,240,1,30000001,30000000));
+    CHECK(!ptwitch_quality_recheck_due(true,240,1,180000000,180000000));
+    CHECK(ptwitch_quality_recheck_due(true,240,1,180000001,180000000));
+    CHECK(ptwitch_quality_retry_allowed(0));
+    CHECK(ptwitch_quality_retry_allowed(4));
+    CHECK(!ptwitch_quality_retry_allowed(5));
     CHECK(tw_channel("Test_Channel",channel)&&same(channel,"test_channel"));
     CHECK(tw_channel(" https://www.twitch.tv/Test_Channel/ ",channel)&&same(channel,"test_channel"));
     CHECK(tw_channel("https://twitch.tv/a",channel)&&same(channel,"a"));

@@ -380,8 +380,11 @@ static void overlay(uint16_t *vram,void *context)
         }
     }
 }
-/* 0: menu, 1: user reconnect, 2: decoder issue; try lower quality once. */
-static int play_attempt(const char *channel,const TwVariant *variant)
+/* 0: menu, 1: reconnect, 2: lower-quality retry, 3: test higher quality,
+   4: higher-quality test failed; restore the previous rendition. */
+static int play_attempt(const char *channel,const TwVariant *variant,
+                        bool monitor_lower_quality,uint64_t quality_check_delay_us,
+                        bool quality_probe)
 {
     Player view={.channel=channel,.variant=variant,.overlay_until=komi_now_us()+4000000u};
     KomiPlayback playback={0};char document[96];snprintf(document,sizeof document,"https://www.twitch.tv/%s",channel);
@@ -389,8 +392,13 @@ static int play_attempt(const char *channel,const TwVariant *variant)
     bool accepted=psp_media_open_page_hls(&komi.media,variant->url,document,++generation,0,
         TILEFINCH_REQUEST_MODE_NO_CORS,TILEFINCH_CREDENTIALS_OMIT,true,true);
     komi_result("live open accepted=%d",accepted);
-    if(!accepted){ptube_operation_end();message("Player could not open the stream",NULL);return false;}
-    reset_input();uint64_t started=komi_now_us(),starved=0;bool opened=false;int retry=0;
+    if(!accepted){
+        ptube_operation_end();
+        if(quality_probe){komi_result("higher-quality probe rejected before open");return 4;}
+        message("Player could not open the stream",NULL);return false;
+    }
+    reset_input();uint64_t started=komi_now_us(),starved=0,stable_since=0;
+    bool opened=false;int retry=0;
     uint64_t next_report=started;
     for(;;){
         komi_progress("live-player");input();uint64_t now=komi_now_us();
@@ -429,13 +437,44 @@ static int play_attempt(const char *channel,const TwVariant *variant)
                     metrics.worker_poll_max_us,metrics.last_multi_code,metrics.last_running);
             }
         }
-        if(ui->playing&&komi.media.frame.pixels&&!ui->buffering){if(!opened){opened=true;ptube_operation_end();komi_result("first-frame channel=%s after-ms=%u",channel,(unsigned)((now-started)/1000));}starved=0;}
-        else if(opened&&!starved)starved=now;
+        if(ui->playing&&komi.media.frame.pixels&&!ui->buffering){
+            if(!opened){opened=true;ptube_operation_end();komi_result("first-frame channel=%s after-ms=%u",channel,(unsigned)((now-started)/1000));}
+            starved=0;
+            if((monitor_lower_quality||quality_probe)&&stable_since==0)
+                stable_since=now;
+            if(ptwitch_quality_recheck_due(monitor_lower_quality,
+                    variant->height,stable_since,now,quality_check_delay_us)){
+                komi_result("lower rendition %up stable for %ums; checking for higher quality",
+                    variant->height,(unsigned)(quality_check_delay_us/1000u));
+                retry=3;break;
+            }
+            if(quality_probe&&stable_since!=0&&now>=stable_since
+               &&now-stable_since>=PTWITCH_QUALITY_RECHECK_STABLE_US){
+                komi_result("higher rendition %up stable for 30s; keeping it",
+                            variant->height);
+                quality_probe=false;
+            }
+        }
+        else {
+            stable_since=0;
+            if(opened&&!starved)starved=now;
+        }
+        if(quality_probe&&now>=started
+           &&now-started>=PTWITCH_QUALITY_PROBE_WINDOW_US){
+            komi_result("higher-quality probe exceeded %ums; restoring lower rendition",
+                (unsigned)(PTWITCH_QUALITY_PROBE_WINDOW_US/1000u));
+            retry=4;break;
+        }
         if(!view.failed&&(ui->failed||ui->ended||(!opened&&now-started>60000000u)||(starved&&now-starved>45000000u))){
             view.failed=true;ptube_operation_end();
             snprintf(view.error,sizeof view.error,"%s",ui->failed?ui->status:ui->ended?"Stream ended":"Stream stalled. Reconnect to retry.");
             komi_result("live playback stopped failed=%d ended=%d",ui->failed,ui->ended);
             report_decoder();
+            if(quality_probe){
+                komi_result("higher-quality probe failed at %up; restoring prior rendition",
+                            variant->height);
+                retry=4;break;
+            }
             bool avc_refused=ui->failed&&(strstr(ui->status,"AVC")
                 ||strstr(ui->status,"H.264")||strstr(ui->status,"80628"));
             bool decoder_no_progress=ui->failed
@@ -473,11 +512,96 @@ static void watch(const char *channel)
 {
     snprintf(last_channel,sizeof last_channel,"%s",channel);
     unsigned maximum_height=360;
-    for(;;){TwVariant variant={0};status[0]=0;
-        if(!resolve(channel,&variant,maximum_height)){message(status,"Back to the menu");break;}
-        int retry=play_attempt(channel,&variant);
-        maximum_height=retry==2?variant.height-1:360;
-        memset(&variant,0,sizeof variant);if(!retry)break;
+    bool monitor_lower_quality=false;
+    bool check_for_higher_quality=false;
+    bool restore_saved_quality=false;
+    unsigned quality_probe_retries=0;
+    uint64_t quality_check_delay_us=PTWITCH_QUALITY_RECHECK_STABLE_US;
+    TwVariant saved_lower_quality={0};
+    for(;;){
+        TwVariant variant={0};bool quality_probe=false;status[0]=0;
+        if(restore_saved_quality){
+            variant=saved_lower_quality;
+            restore_saved_quality=false;
+        }else if(check_for_higher_quality){
+            check_for_higher_quality=false;
+            TwVariant candidate={0};
+            bool found=resolve(channel,&candidate,360);
+            if(found&&candidate.height>saved_lower_quality.height){
+                variant=candidate;
+                quality_probe=true;
+                maximum_height=360;
+                komi_result("quality recovery probe lower=%up candidate=%up",
+                    saved_lower_quality.height,candidate.height);
+            }else{
+                if(ptwitch_quality_retry_allowed(quality_probe_retries)){
+                    quality_probe_retries++;
+                    quality_check_delay_us=PTWITCH_QUALITY_RETRY_DELAY_US;
+                    monitor_lower_quality=true;
+                    komi_result("quality recovery found no higher rendition; retry %u/%u after 3min",
+                        quality_probe_retries,PTWITCH_QUALITY_MAX_RETRIES);
+                }else{
+                    monitor_lower_quality=false;
+                    komi_result("quality recovery exhausted %u retries; staying lower",
+                        PTWITCH_QUALITY_MAX_RETRIES);
+                }
+                status[0]=0;
+                variant=saved_lower_quality;
+            }
+        }else if(!resolve(channel,&variant,maximum_height)){
+            message(status,"Back to the menu");break;
+        }
+        int retry=play_attempt(channel,&variant,monitor_lower_quality,
+            quality_check_delay_us,quality_probe);
+        if(retry==3){
+            saved_lower_quality=variant;
+            check_for_higher_quality=true;
+            monitor_lower_quality=false;
+            maximum_height=360;
+            memset(&variant,0,sizeof variant);
+            continue;
+        }
+        if(quality_probe&&retry==4){
+            if(ptwitch_quality_retry_allowed(quality_probe_retries)){
+                quality_probe_retries++;
+                quality_check_delay_us=PTWITCH_QUALITY_RETRY_DELAY_US;
+                monitor_lower_quality=true;
+                komi_result("quality recovery failed; retry %u/%u after 3min at %up",
+                    quality_probe_retries,PTWITCH_QUALITY_MAX_RETRIES,
+                    saved_lower_quality.height);
+            }else{
+                monitor_lower_quality=false;
+                komi_result("quality recovery exhausted %u retries; returning to %up",
+                    PTWITCH_QUALITY_MAX_RETRIES,saved_lower_quality.height);
+            }
+            status[0]=0;
+            maximum_height=saved_lower_quality.height;
+            restore_saved_quality=true;
+            memset(&variant,0,sizeof variant);
+            continue;
+        }
+        if(retry==2){
+            if(variant.height==360u){
+                monitor_lower_quality=true;
+                quality_probe_retries=0;
+                quality_check_delay_us=PTWITCH_QUALITY_RECHECK_STABLE_US;
+            }
+            maximum_height=variant.height>0?variant.height-1u:360u;
+            memset(&variant,0,sizeof variant);
+            continue;
+        }
+        if(retry==1){
+            maximum_height=360;
+            monitor_lower_quality=false;
+            check_for_higher_quality=false;
+            restore_saved_quality=false;
+            quality_probe_retries=0;
+            quality_check_delay_us=PTWITCH_QUALITY_RECHECK_STABLE_US;
+            memset(&variant,0,sizeof variant);
+            continue;
+        }
+        memset(&variant,0,sizeof variant);
+        if(!retry)break;
     }
 }
 static void ask_channel(bool save)

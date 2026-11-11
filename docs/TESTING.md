@@ -1,6 +1,21 @@
 # PTwitch validation — 2026-11-11
 
-## Build 23: bounded mid-playback decoder fallback
+## Build 24: delayed quality recovery
+
+After a 360p decoder no-progress failure, Build 23 could retry lower quality,
+but did not test whether the higher rendition had become usable later. Build 24
+waits for 30 continuous seconds of non-buffering playback at the lower quality,
+then resolves a fresh rendition and probes higher quality. If the probe fails or
+no higher rendition is available, it reopens the saved lower rendition and waits
+three minutes of stable playback before retrying, for up to five retries after
+the initial probe. A stable higher-quality probe is kept. Each probe requires a
+brief reconnect to the live edge.
+
+Core policy tests cover the 30-second and three-minute boundaries, retry cap,
+and 240p/360p limits; the frontend passes a clang syntax check. PSP build and
+device behavior are not yet verified.
+
+## Build 23: bounded mid-playback decoder fallback (previous source)
 
 The Build 22 log shows HLS data and playlist refreshes continuing at the final
 failure: two media requests were active, about 2.4 seconds of network runway
@@ -17,7 +32,7 @@ startup refusal, mid-stream 360p no-progress, and the 240p stop boundary. This
 is a recovery attempt, not a confirmed decoder fix; PSP verification remains
 required.
 
-## Build 21 TS track bypass (current source)
+## Build 21 TS track bypass (previous source)
 
 The pasted build 20 counters freeze at clock 249,934,666 us, with 19,214
 submitted packets and 161 HLS samples queued. Over the next five seconds,
