@@ -1,4 +1,5 @@
 #include "twitch.h"
+#include "../common/ptwitch_playback_policy.h"
 /* Freestanding tests run the real C implementation on the host. */
 #define CHECK(x) do {if(!(x))return __LINE__;}while(0)
 static int same(const char *a,const char *b){while(*a&&*a==*b){++a;++b;}return *a==*b;}
@@ -15,6 +16,10 @@ static TwResult token(const char *s,char *url){return tw_token_url("Test_Channel
 int test_core(void)
 {
     char channel[TW_CHANNEL_SIZE],url[TW_MASTER_SIZE],request[1024];TwVariant v;
+    CHECK(ptwitch_decoder_fallback_allowed(360,false,true,false));
+    CHECK(ptwitch_decoder_fallback_allowed(360,true,false,true));
+    CHECK(!ptwitch_decoder_fallback_allowed(240,true,false,true));
+    CHECK(!ptwitch_decoder_fallback_allowed(360,true,false,false));
     CHECK(tw_channel("Test_Channel",channel)&&same(channel,"test_channel"));
     CHECK(tw_channel(" https://www.twitch.tv/Test_Channel/ ",channel)&&same(channel,"test_channel"));
     CHECK(tw_channel("https://twitch.tv/a",channel)&&same(channel,"a"));

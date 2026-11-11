@@ -1,5 +1,22 @@
 # PTwitch validation — 2026-11-11
 
+## Build 23: bounded mid-playback decoder fallback
+
+The Build 22 log shows HLS data and playlist refreshes continuing at the final
+failure: two media requests were active, about 2.4 seconds of network runway
+remained, and refresh failures were zero. The decoder job was pending with no
+native firmware error, while the HLS queue was backpressured. The terminal
+`NO PACKET ACCEPTED IN 6004ms` is therefore a decoder/scheduler no-progress
+failure, not a network timeout. The log ends before teardown/fallback results.
+
+The frontend previously retried a lower rendition only for startup AVC refusal.
+Build 23 also retries once at a lower rendition when a >240p stream fails with
+`VIDEO DECODER MADE NO PROGRESS` after a first frame. Lower-resolution streams
+do not loop on this path; they show the existing error. A host policy test covers
+startup refusal, mid-stream 360p no-progress, and the 240p stop boundary. This
+is a recovery attempt, not a confirmed decoder fix; PSP verification remains
+required.
+
 ## Build 21 TS track bypass (current source)
 
 The pasted build 20 counters freeze at clock 249,934,666 us, with 19,214

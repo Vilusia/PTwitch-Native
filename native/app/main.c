@@ -13,6 +13,7 @@
 #include "komi_runtime.h"
 #include "../common/ptube_guard.h"
 #include "../common/ptube_power.h"
+#include "../common/ptwitch_playback_policy.h"
 #include "tilefinch/fetch.h"
 #include "tilefinch/psp_threads.h"
 #include "tilefinch/psp_media_hls.h"
@@ -379,7 +380,7 @@ static void overlay(uint16_t *vram,void *context)
         }
     }
 }
-/* 0: menu, 1: user reconnect, 2: startup decoder refusal; try lower quality. */
+/* 0: menu, 1: user reconnect, 2: decoder issue; try lower quality once. */
 static int play_attempt(const char *channel,const TwVariant *variant)
 {
     Player view={.channel=channel,.variant=variant,.overlay_until=komi_now_us()+4000000u};
@@ -435,9 +436,15 @@ static int play_attempt(const char *channel,const TwVariant *variant)
             snprintf(view.error,sizeof view.error,"%s",ui->failed?ui->status:ui->ended?"Stream ended":"Stream stalled. Reconnect to retry.");
             komi_result("live playback stopped failed=%d ended=%d",ui->failed,ui->ended);
             report_decoder();
-            if(!opened&&ui->failed&&variant->height>144&&
-                (strstr(ui->status,"AVC")||strstr(ui->status,"H.264")||strstr(ui->status,"80628"))){
-                komi_result("decoder startup refused %up; trying lower quality",variant->height);
+            bool avc_refused=ui->failed&&(strstr(ui->status,"AVC")
+                ||strstr(ui->status,"H.264")||strstr(ui->status,"80628"));
+            bool decoder_no_progress=ui->failed
+                &&strstr(ui->status,"VIDEO DECODER MADE NO PROGRESS");
+            if(ptwitch_decoder_fallback_allowed(variant->height,opened,
+                avc_refused,decoder_no_progress)){
+                komi_result("decoder %s at %up; trying lower quality once",
+                    decoder_no_progress?"made no progress":"startup refused",
+                    variant->height);
                 retry=2;break;
             }
             /* Close failed HLS immediately, before displaying the error.
