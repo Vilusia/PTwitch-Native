@@ -1,0 +1,13 @@
+/upstream/
+/dist/
+/native/test-results/
+__pycache__/
+*.log
+*.tmp
+ptwitch-favorites*
+ptwitch-power.txt
+ptwitch-wifi.txt
+ptwitch-avc-*
+tilefinch-validation*
+tilefinch-crash*
+.library-helper-current
