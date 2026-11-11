@@ -346,6 +346,23 @@ static bool resolve(const char *channel,TwVariant *variant,unsigned maximum_heig
     return true;
 }
 typedef struct {const char *channel;const TwVariant *variant;uint64_t overlay_until;bool failed;char error[192];} Player;
+static void report_decoder(void)
+{
+    if(!komi.media.playback)return;
+    MediaPlaybackJobStats job={0};MediaBackendStats backend={0};
+    media_playback_job_stats(komi.media.playback,&job);
+    komi_result("decoder progress clock-us=%llu buffered-us=%llu packets=%u horizon=%u submit-block=%u source-block=%u pending=%d phase=%d audio-bypass=%u",
+        (unsigned long long)komi.media.clock_us,
+        (unsigned long long)media_playback_buffered_until_us(komi.media.playback),
+        (unsigned)job.packets_submitted,(unsigned)job.horizon_breaks,
+        (unsigned)job.submit_block_calls,(unsigned)job.source_block_calls,
+        komi.media.decode_job_pending,(int)komi.media.job_phase,(unsigned)job.head_alt_submitted);
+    if(media_playback_backend_stats(komi.media.playback,&backend))
+        komi_result("decoder backend video-packets=%u audio-packets=%u frames=%u take-busy=%u take-early=%u native=0x%08x",
+            (unsigned)backend.submitted_video_packets,(unsigned)backend.submitted_audio_packets,
+            (unsigned)backend.decoded_video_frames,(unsigned)backend.video_take_busy,
+            (unsigned)backend.video_take_early,(unsigned)backend.last_native_error);
+}
 static void overlay(uint16_t *vram,void *context)
 {
     Player *p=context;const PspUiMediaState *ui=&komi.media.ui;
@@ -397,6 +414,7 @@ static int play_attempt(const char *channel,const TwVariant *variant)
                               ?(hls.buffered_until_us-komi.media.clock_us)/1000u:0),hls.delivery_backpressured);
             }
             next_report=now+5000000u;
+            report_decoder();
             FetchBackgroundTransportMetrics metrics={0};
             if(fetch_background_transport_metrics(&metrics)){
                 komi_result("network worker queued=%u running=%u complete=%u perform=%u poll=%u headers=%u body=%u finished=%u retired=%u",
@@ -416,6 +434,7 @@ static int play_attempt(const char *channel,const TwVariant *variant)
             view.failed=true;ptube_operation_end();
             snprintf(view.error,sizeof view.error,"%s",ui->failed?ui->status:ui->ended?"Stream ended":"Stream stalled. Reconnect to retry.");
             komi_result("live playback stopped failed=%d ended=%d",ui->failed,ui->ended);
+            report_decoder();
             if(!opened&&ui->failed&&variant->height>144&&
                 (strstr(ui->status,"AVC")||strstr(ui->status,"H.264")||strstr(ui->status,"80628"))){
                 komi_result("decoder startup refused %up; trying lower quality",variant->height);

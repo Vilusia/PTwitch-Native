@@ -5,7 +5,13 @@ KOMI Tube / Tilefinch foundation. The PSP connects directly to Twitch over
 Wi-Fi. No PC, VPS, relay, Streamlink installation, or conversion server is
 needed **to watch**. A development computer is still needed to compile it.
 
-**Current status: build 19 source. Build 8 achieved PSP audio/video playback.**
+**Current status: build 21 source. Build 8 achieved PSP audio/video playback.**
+Build 21 separates TS video/audio read heads over one bounded download, so
+held video cannot prevent audio from advancing the presentation clock.
+This targets the no-progress stall observed after several minutes of playback.
+Build 19 sustains stopsigncam for over four minutes with about two seconds
+buffered, then one run trips a decoder no-progress guard. Build 20 adds
+playback/decoder counters to locate that stall; it is a diagnostic build.
 Build 18 plays stopsigncam and recovers from buffering, but its TS queue
 usually holds less than half a second. Build 19 increases bounded TS sample
 capacity and readahead so a typical mixed stream can retain about two seconds.

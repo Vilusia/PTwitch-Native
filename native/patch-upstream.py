@@ -37,6 +37,10 @@ if 'bool delivery_backpressured;' not in header_source:
         '    bool ended;\n    bool delivery_backpressured;\n} MediaHlsStats;')
     hls_header.write_text(header_source)
 hls = engine / 'src/media_hls.c'
+header_source = hls_header.read_text()
+if 'bool media_hls_source_track_views(' not in header_source:
+    header_source += '\nbool media_hls_source_track_views(MediaHlsSource *, MediaSampleSource *, MediaSampleSource *);\n'
+    hls_header.write_text(header_source)
 overlay = root / 'native/engine/media_hls.c'
 if (hls.read_bytes() != overlay.read_bytes()
     and hashlib.sha256(hls.read_bytes()).hexdigest() != 'c2da339e7ccbbb30e2479583f6b24decfddbca9c2452c8e3de9a5932a9ea5f02'
@@ -44,6 +48,7 @@ if (hls.read_bytes() != overlay.read_bytes()
     raise SystemExit('Upstream HLS source no longer matches the pinned engine')
 shutil.copyfile(overlay, hls)
 shutil.copyfile(root / 'native/engine/ptwitch_hls_fmp4.inc', engine / 'src/ptwitch_hls_fmp4.inc')
+shutil.copyfile(root / 'native/engine/ptwitch_hls_tracks.inc', engine / 'src/ptwitch_hls_tracks.inc')
 
 # Preserve each track's original tfdt origin. The file parser normalizes
 # origins independently; live HLS needs the shared clock to retain A/V skew
@@ -170,6 +175,21 @@ if hls_error_log not in source:
     source = source.replace(anchor, hls_error_log + anchor)
 hls_transport.write_text(source)
 print('Applied HLS pre-header failure completion fix.')
+
+source = hls_transport.read_text()
+anchor = '''    bool separate = context->source_count == 2u
+        && context->source[1] != NULL;'''
+after = '''    if (context->source_count == 1u && audio_source != NULL
+        && media_hls_source_track_views(context->source[0], video_source, audio_source)) {
+        if (has_separate_audio != NULL) *has_separate_audio = true;
+        return true;
+    }
+''' + anchor
+if after not in source:
+    if source.count(anchor) != 1:
+        raise SystemExit('HLS shared track handoff seam changed')
+    source = source.replace(anchor,after)
+hls_transport.write_text(source)
 
 source = hls_transport.read_text()
 anchor = '        stats->active_requests += one.active_requests;'

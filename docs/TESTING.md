@@ -1,6 +1,58 @@
 # PTwitch validation — 2026-11-11
 
-## Build 19 TS reserve (current source)
+## Build 21 TS track bypass (current source)
+
+The pasted build 20 counters freeze at clock 249,934,666 us, with 19,214
+submitted packets and 161 HLS samples queued. Over the next five seconds,
+submission blocks rise from 24,880 to 25,780 and early-picture holds from
+53 to 353; audio/video packet counts, decoded frames and clock remain fixed.
+No firmware error is recorded. This matches a dependency already handled by
+the engine for independent sources: video waiting on the audio-driven clock
+must not block delivery of the audio that advances that clock.
+
+Mixed TS previously supplied a single FIFO sample source, so the existing
+MediaPlayback alternate-track bypass had no second head. Build 21 exposes
+two typed views over that same TS source/download and arena. Each track may
+read only its oldest unread sample. Out-of-order reads mark descriptors
+consumed, while payload bytes and descriptors are reclaimed strictly in
+allocation order; held video cannot be overwritten by audio progress. A
+second read of consumed identity fails. Views allocate no duplicate stream or
+payload arena; only the normal playback scheduler's bounded second packet
+staging is enabled. Source accounting charges the shared storage once.
+
+A regression uses the real HLS parser, two track views and MediaPlayback
+scheduler with a backend that refuses video. Audio still advances through
+the alternate head, then all 360 video and 564 AAC units drain after the hold
+is released. Restoring the original single mixed-source handoff makes that
+test fail. Direct tests also check a retained video identity/payload during
+24 out-of-order audio reads, duplicate-read refusal, descriptor/arena wraps,
+only two segment requests, and zero owned Budget bytes at teardown. Existing
+MP4, TS, buffering, cancellation and memory-refusal host cases pass.
+
+This is a targeted pipeline correction consistent with the device counters;
+real PSP playback remains to be verified. No clock forcing, presentation
+eligibility relaxation, watchdog extension or new network requests are used.
+Frontend syntax and package identity checks pass. The PSP build attempt is
+blocked before compilation by WSL path conversion exit -1 in this session.
+
+## Build 20 decoder progress diagnostics (previous source)
+
+The supplied build 19 `ptwitch(6).log` plays stopsigncam at 640x360 from
+3,495 ms through about 260 seconds. It maintains roughly two seconds of
+network runway through most of the run. The terminal error is `VIDEO DECODER
+MADE NO PROGRESS`, reason `NO PACKET ACCEPTED IN 6004ms`, with native status
+zero, 161 samples still queued, and 2,226 ms network runway. The log does not
+distinguish submission backpressure, timestamp eligibility or a blocked codec
+job; queued samples alone do not prove that a video packet is eligible.
+
+Build 20 logs read-only job/backend counters every five seconds and again
+before playback cleanup: clock and decoded horizon, submitted packets,
+horizon breaks, source/submission block counts, pending job state, codec
+video/audio submissions, decoded frames, presentation holds and native status.
+No watchdog is disabled or extended. This adds diagnostic evidence, not a
+claimed correction to the stall.
+
+## Build 19 TS reserve (previous source)
 
 The uploaded build 18 log `ptwitch(5).log` plays stopsigncam at 640x360 for
 over a minute, advances playlists and segments, and recovers from buffering.

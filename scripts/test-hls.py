@@ -22,6 +22,7 @@ headers = {
 typedef _Atomic(int) atomic_int;
 typedef _Atomic(unsigned) atomic_uint;
 typedef _Atomic(bool) atomic_bool;
+#define atomic_init(p,v) __c11_atomic_init(p,v)
 typedef enum { memory_order_relaxed=0, memory_order_consume=1, memory_order_acquire=2,
 memory_order_release=3, memory_order_acq_rel=4, memory_order_seq_cst=5 } memory_order;
 #define atomic_load_explicit(p,o) __c11_atomic_load((p),(o))
@@ -70,7 +71,7 @@ exports = ['__stdio_common_vsprintf', '__stdio_common_vfprintf', '__acrt_iob_fun
 (OUT / 'ucrt.def').write_text('LIBRARY ucrtbase.dll\nEXPORTS\n' + '\n'.join(exports) + '\n')
 P.run([str(TOOLS / 'ld.lld.exe'), '-flavor', 'link', '/dll', '/noentry', '/def:' + str(OUT / 'ucrt.def'), '/machine:x64', '/out:' + str(OUT / 'ucrtbase.dll'), '/implib:' + str(OUT / 'ucrt.lib'), '/force:unresolved'], check=True, stdout=P.DEVNULL, stderr=P.DEVNULL)
 (OUT / 'ucrtbase.dll').unlink(missing_ok=True)  # import library only; load the real system CRT
-sources = ['src/media_hls.c', 'src/media_mp4.c', 'src/media_h264_psp_compat.c', 'src/swdec/swdec_ts.c', 'src/url.c', 'src/public_suffix.c', 'src/psp_media_state.c', 'tests/test_psp_media_state.c']
+sources = ['src/media_hls.c', 'src/media_backend.c', 'src/media_source.c', 'src/media_mp4.c', 'src/media_h264_psp_compat.c', 'src/swdec/swdec_ts.c', 'src/url.c', 'src/public_suffix.c', 'src/psp_media_state.c', 'tests/test_psp_media_state.c']
 objects = []
 poll_source = (ENGINE / 'src/psp_media_hls.c').read_text()
 (OUT / 'ptwitch_hls_poll.inc').write_text(poll_source[poll_source.index('static MediaHlsTransportPollResult psp_hls_poll('):poll_source.index('static bool psp_hls_playlist_inflater_begin(')])
@@ -84,6 +85,7 @@ for path in [ENGINE / p for p in sources] + [ROOT / 'native/tests/hls_host.c', R
     P.run([str(TOOLS / 'clang.exe'), '--target=x86_64-pc-windows-msvc', '-std=c11', '-O1', '-ffreestanding', '-fno-builtin', '-fno-stack-protector', '-mno-stack-arg-probe', '-ffunction-sections', '-fdata-sections', '-nostdlib', '-Wall', '-Wextra', '-Werror', *extra, '-I', str(OUT), '-I', str(ENGINE / 'include'), '-I', str(ENGINE / 'src'), '-c', str(path), '-o', str(obj)], check=True)
     objects.append(str(obj))
 dll = OUT / 'hls-test.dll'
+objects.append('/export:hls_track_views_test')
 P.run([str(TOOLS / 'ld.lld.exe'), '-flavor', 'link', '/dll', '/noentry', '/nodefaultlib', '/opt:ref', '/export:hls_ts_packet_test', '/export:hls_ts_packet_prepare', '/export:hls_transport_test', '/export:hls_test', '/export:ptwitch_avc_snapshot', '/export:ptwitch_test_snapshot_dir', '/export:ptwitch_state_test', '/export:hls_repeat_resume_test', '/out:' + str(dll), *objects, str(OUT / 'ucrt.lib')], check=True)
 
 class Seen(C.Structure):
@@ -223,6 +225,12 @@ if __name__ == '__main__':
         first=ts_fragment(0,frames=180,audio=True),second=ts_fragment(1,frames=180,audio=True),pause_steps=400)
     mixed_clock=mixed_ts.seen[9].dts*1000000//90000
     assert mixed_ts.paused_horizon-mixed_clock>=2000000 and mixed_ts.paused_resumable, mixed_ts.paused_horizon-mixed_clock
+    lib.hls_track_views_test.argtypes=[C.c_char_p,C.c_size_t,C.c_char_p,C.c_size_t,C.c_char_p,C.c_size_t]
+    view_playlist=ts_playlist.replace(b'2.333',b'6.000')
+    view_first=ts_fragment(0,frames=180,audio=True);view_second=ts_fragment(1,frames=180,audio=True)
+    view_line=lib.hls_track_views_test(view_playlist,len(view_playlist),view_first,len(view_first),view_second,len(view_second))
+    assert view_line==0, f'TS blocked-video/audio bypass failed at hls_host.c:{view_line}'
+    print('PASS independent TS track views, held video lifetime, duplicate-read refusal and arena wraps')
     paced_ts=run('TS batched packet delivery keeps pace',playlist=ts_playlist,
         first=ts_fragment(0,frames=70,padding_packets=12),second=ts_fragment(1,frames=70,padding_packets=12),
         slice=C.c_size_t(-1).value)

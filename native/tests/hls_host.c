@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "tilefinch/media_hls.h"
+#include "tilefinch/media_backend.h"
 #include "ptwitch_hls_codec.h"
 #include "media_backend_psp_policy.h"
 #include "ptwitch_hls_buffer_policy.h"
@@ -57,6 +58,12 @@ void *budget_malloc_category(Budget *b,BudgetCategory category,size_t n){
     return p+1;
 }
 void budget_free(Budget *b,void *p){if(p){size_t *header=(size_t*)p-1;b->current-=*header;free(header);}}
+void *budget_realloc_category(Budget *b,BudgetCategory c,void *p,size_t n){
+    if(!n){budget_free(b,p);return NULL;}
+    void *next=budget_malloc_category(b,c,n);if(!next)return NULL;
+    if(p){size_t old=((size_t*)p)[-1];memcpy(next,p,old<n?old:n);budget_free(b,p);}
+    return next;
+}
 void *budget_calloc_category(Budget *b,BudgetCategory c,size_t count,size_t size){
     if(size&&count>SIZE_MAX/size)return NULL;
     void *p=budget_malloc_category(b,c,count*size);if(p)memset(p,0,count*size);return p;
@@ -199,4 +206,105 @@ int hls_repeat_resume_test(void)
     input.network_target_cap_us=ptwitch_hls_resume_cap(input.network_ahead_us,
         input.fill_pending,PSP_MEDIA_BUFFER_TARGET_US);
     return psp_media_buffer_policy(input).action==PSP_MEDIA_BUFFER_END?0:2;
+}
+
+typedef struct {bool hold;size_t audio,video;} HeldBackend;
+static MediaBackendResult held_submit(void *opaque,const MediaMp4Sample *sample,
+    const unsigned char *bytes,size_t n,char *error,size_t capacity)
+{
+    (void)bytes;(void)n;(void)error;(void)capacity;HeldBackend *h=opaque;
+    if(sample->kind==MEDIA_MP4_TRACK_VIDEO){if(h->hold)return MEDIA_BACKEND_WOULD_BLOCK;h->video++;}
+    else h->audio++;
+    return MEDIA_BACKEND_ACCEPTED;
+}
+static bool held_advance(void *opaque,uint64_t clock,char *error,size_t n)
+{(void)opaque;(void)clock;(void)error;(void)n;return true;}
+static void held_destroy(void *opaque){(void)opaque;}
+int hls_track_views_test(const char *playlist,size_t np,const unsigned char *first,size_t nf,
+                         const unsigned char *second,size_t ns)
+{
+    Budget b;budget_init(&b,8u*1024u*1024u);char error[256]={0};int result=0;
+    Transport t={.first=first,.second=second,.nf=nf,.ns=ns,.slice=SIZE_MAX};
+    MediaHlsTransport transport={&t,start,poll,cancel};
+    MediaHlsPlaylist *p=media_hls_playlist_parse(&b,"https://example.ttvnw.net/live.m3u8",
+        (const unsigned char*)playlist,np,error,sizeof(error));
+    MediaHlsSource *s=p?media_hls_source_create(&b,p,&transport,error,sizeof(error)):NULL;
+    unsigned char *bytes=malloc(512u*1024u);size_t audios=0,videos=0;
+    MediaPlayback *playback=NULL;
+#define TRACK_CHECK(x) do{if(!(x)){result=__LINE__;goto finish;}}while(0)
+    TRACK_CHECK(s&&bytes);
+    for(unsigned i=0;i<10000;++i){
+        MediaHlsPrimeStatus prime=media_hls_source_prime(s,error,sizeof(error));
+        TRACK_CHECK(prime!=MEDIA_HLS_PRIME_FAILED);
+        if(prime==MEDIA_HLS_PRIME_READY)break;
+    }
+    MediaSampleSource video={0},audio={0};
+    TRACK_CHECK(media_hls_source_track_views(s,&video,&audio));
+    MediaMp4TrackInfo info={0};
+    TRACK_CHECK(audio.ops->track_info(audio.opaque,0,&info)&&info.kind==MEDIA_MP4_TRACK_AUDIO);
+    MediaMp4Sample held={0};
+    media_hls_source_pump(s,1);
+    TRACK_CHECK(video.ops->next_sample(video.opaque,&held)&&held.kind==MEDIA_MP4_TRACK_VIDEO);
+    /* Simulate a blocked video head. Audio behind it must remain available. */
+    for(unsigned i=0;i<24;++i){
+        MediaMp4Sample a={0};
+        TRACK_CHECK(audio.ops->next_sample(audio.opaque,&a)&&a.kind==MEDIA_MP4_TRACK_AUDIO&&a.track_index==0);
+        TRACK_CHECK(audio.ops->read_sample(audio.opaque,&a,bytes,512u*1024u));audios++;
+        TRACK_CHECK(!audio.ops->read_sample(audio.opaque,&a,bytes,512u*1024u));
+        TRACK_CHECK(video.ops->sample_resident(video.opaque,&held));
+    }
+    TRACK_CHECK(video.ops->read_sample(video.opaque,&held,bytes,512u*1024u));videos++;
+    TRACK_CHECK(bytes[held.size-1]==0x11);
+    /* Drain across arena/descriptor wraps without losing either track. */
+    for(unsigned i=0;i<10000;++i){
+        media_hls_source_pump(s,i*16667u);
+        MediaSampleSource *views[]={&video,&audio};
+        for(unsigned k=0;k<2;++k){
+            MediaMp4Sample sample={0};MediaSampleSource *v=views[k];
+            if(v->ops->next_sample(v->opaque,&sample)){
+                TRACK_CHECK(v->ops->read_sample(v->opaque,&sample,bytes,512u*1024u));
+                if(k)audios++;else videos++;
+            }
+        }
+        MediaHlsStats stats={0};media_hls_source_stats(s,&stats);
+        TRACK_CHECK(!media_hls_source_failed(s));
+        if(stats.ended&&stats.queued_samples==0){TRACK_CHECK(stats.segments_started==2);break;}
+    }
+    TRACK_CHECK(videos==360&&audios==564);
+    media_hls_source_destroy(s);s=NULL;
+    p=media_hls_playlist_parse(&b,"https://example.ttvnw.net/live.m3u8",
+        (const unsigned char*)playlist,np,error,sizeof(error));
+    s=p?media_hls_source_create(&b,p,&transport,error,sizeof(error)):NULL;
+    TRACK_CHECK(s);p=NULL;
+    for(unsigned i=0;i<10000;++i){
+        MediaHlsPrimeStatus prime=media_hls_source_prime(s,error,sizeof(error));
+        TRACK_CHECK(prime!=MEDIA_HLS_PRIME_FAILED);
+        if(prime==MEDIA_HLS_PRIME_READY)break;
+    }
+    TRACK_CHECK(media_hls_source_track_views(s,&video,&audio));
+    HeldBackend h={.hold=true};MediaBackend backend={.opaque=&h,.submit=held_submit,
+        .advance=held_advance,.destroy=held_destroy};
+    playback=media_playback_create_sources(&b,&video,&audio,&backend,NULL,error,sizeof(error));
+    TRACK_CHECK(playback);
+    TRACK_CHECK(media_playback_prime_video_source(playback,0,NULL,error,sizeof(error))==MEDIA_PLAYBACK_SOURCE_PRIME_READY);
+    TRACK_CHECK(media_playback_prime_audio_source(playback,0,NULL,error,sizeof(error))==MEDIA_PLAYBACK_SOURCE_PRIME_READY);
+    for(unsigned i=0;i<100;++i){
+        media_hls_source_pump(s,i*16667u);
+        TRACK_CHECK(media_playback_advance(playback,2000000u,error,sizeof(error)));
+    }
+    MediaPlaybackJobStats job={0};media_playback_job_stats(playback,&job);
+    TRACK_CHECK(h.audio>=24&&h.video==0&&job.head_alt_submitted>0);
+    h.hold=false;
+    for(unsigned i=0;i<1000;++i){
+        media_hls_source_pump(s,i*16667u);
+        TRACK_CHECK(media_playback_advance(playback,20000000u,error,sizeof(error)));
+        if(h.audio==564&&h.video==360)break;
+    }
+    TRACK_CHECK(h.audio==564&&h.video==360);
+finish:
+    media_playback_destroy(playback);
+    free(bytes);if(s)media_hls_source_destroy(s);else media_hls_playlist_destroy(p);
+    if(b.current)result=__LINE__;
+    return result;
+#undef TRACK_CHECK
 }

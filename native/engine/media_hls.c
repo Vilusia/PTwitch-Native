@@ -103,7 +103,10 @@ typedef struct {
     MediaMp4TrackKind kind;
     uint8_t packet_format;
     bool keyframe;
+    bool consumed;
 } HlsQueuedSample;
+
+typedef struct {MediaHlsSource *source;MediaMp4TrackKind kind;} HlsTrackView;
 
 typedef struct {
     uint64_t handle;
@@ -118,6 +121,7 @@ typedef enum {
 } HlsAudioSegmentKind;
 
 struct MediaHlsSource {
+    HlsTrackView views[2];
     Budget *budget;
     MediaHlsPlaylist *playlist;
     MediaHlsTransport transport;
@@ -1207,7 +1211,7 @@ static bool hls_queue_has_kind(const MediaHlsSource *source,
     if (source == NULL) return false;
     for (size_t i = 0; i < source->queue_count; i++) {
         size_t at = (source->queue_head + i) % HLS_SAMPLE_LIMIT;
-        if (source->queue[at].kind == kind) return true;
+          if (!source->queue[at].consumed && source->queue[at].kind == kind) return true;
     }
     return false;
 }
@@ -2036,13 +2040,13 @@ static bool hls_sample_resident(const void *opaque,
         && source->queue[source->queue_head].identity == sample->offset;
 }
 
-static bool hls_read_sample(void *opaque, const MediaMp4Sample *sample,
-                            void *destination, size_t capacity)
+static bool hls_read_queued(MediaHlsSource *source,size_t index,
+                            const MediaMp4Sample *sample,void *destination,size_t capacity)
 {
-    MediaHlsSource *source = opaque;
-    if (!hls_sample_resident(source, sample) || destination == NULL)
+    if (!source || !sample || index>=HLS_SAMPLE_LIMIT || !destination
+        ||source->queue[index].consumed||source->queue[index].identity!=sample->offset)
         return false;
-    HlsQueuedSample *queued = &source->queue[source->queue_head];
+    HlsQueuedSample *queued = &source->queue[index];
     if (queued->payload_length > capacity) {
         hls_source_fail(source, "HLS sample exceeds packet buffer");
         return false;
@@ -2052,15 +2056,27 @@ static bool hls_read_sample(void *opaque, const MediaMp4Sample *sample,
     memcpy(destination, source->queue_bytes + queued->payload_offset, first);
     memcpy((unsigned char *) destination + first, source->queue_bytes,
            queued->payload_length - first);
-    source->queue_read = (queued->payload_offset + queued->payload_length)
-        % source->queue_capacity;
-    source->queue_used -= queued->payload_length;
-    source->queue_head = (source->queue_head + 1u) % HLS_SAMPLE_LIMIT;
-    source->queue_count--;
+    queued->consumed=true;
+    /* Independent track reads may retire audio behind a held video packet.
+       Reclaim bytes only in original allocation order, never overwrite a
+       packet still owned by either view. */
+    while(source->queue_count&&source->queue[source->queue_head].consumed){
+        HlsQueuedSample *head=&source->queue[source->queue_head];
+        source->queue_read=(head->payload_offset+head->payload_length)%source->queue_capacity;
+        source->queue_used-=head->payload_length;
+        source->queue_head=(source->queue_head+1u)%HLS_SAMPLE_LIMIT;
+        source->queue_count--;
+    }
     source->seek_pristine = false;
     source->stats.queued_samples = source->queue_count;
     source->stats.queued_bytes = source->queue_used;
     return true;
+}
+
+static bool hls_read_sample(void *opaque,const MediaMp4Sample *sample,void *dst,size_t cap)
+{
+    MediaHlsSource *s=opaque;
+    return hls_sample_resident(s,sample)&&hls_read_queued(s,s->queue_head,sample,dst,cap);
 }
 
 static void hls_reset_queue(MediaHlsSource *source)
@@ -2197,6 +2213,8 @@ static const MediaSampleSourceOps hls_source_ops = {
     .retained_bytes = hls_retained_bytes
 };
 
+#include "ptwitch_hls_tracks.inc"
+
 bool media_hls_source_sample_source(
     MediaHlsSource *source, MediaSampleSource *sample_source)
 {
@@ -2243,6 +2261,7 @@ void media_hls_source_stats(const MediaHlsSource *source,
         uint64_t buffered90k = 0;
         for (size_t i = 0; i < source->queue_count; i++) {
             size_t at = (source->queue_head + i) % HLS_SAMPLE_LIMIT;
+              if(source->queue[at].consumed)continue;
             uint64_t end = source->queue[at].raw_pts90k;
             if (source->queue[at].duration90k
                     <= UINT64_MAX - end)
