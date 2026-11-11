@@ -573,3 +573,23 @@ They verify parsing policy and bounds, not Twitch acceptance or decoding.
    Disconnect/reconnect the hotspot and check the failure surface.
 7. Save/remove favorites, restart the app, and check persistence, power modes
    and independent PTube files. Preserve both PTwitch logs when reporting.
+
+## Build 22: live TS discontinuity timeline
+
+The reported build 21 stall retained queued media and native status zero after
+an IDR restart. A host regression reproduces an audio-driven scheduler stall
+when a live segment declares seven seconds but emits six seconds before a
+marked discontinuity. The old code fails to drain the second segment; the
+updated code drains all 360 video and 564 audio samples.
+
+At marked live TS discontinuities, the next shared timestamp epoch starts at
+the latest emitted audio/video endpoint rather than accumulated EXTINF duration.
+Normal segments and fMP4 timing are unchanged. The source stores one additional
+32-bit duration (host structure grows eight bytes through alignment); no new
+allocation, queue capacity, or decoder policy changes. The complete HLS host
+suite passes, including teardown quota checks. This synthetic regression does
+not establish that every hardware no-progress failure has the same cause.
+
+Target check: rebuild build 22 and watch beyond the previous ten-minute failure,
+including an ad/discontinuity. Actual PSP decoding and long playback remain
+unverified in this environment.

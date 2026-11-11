@@ -208,13 +208,13 @@ int hls_repeat_resume_test(void)
     return psp_media_buffer_policy(input).action==PSP_MEDIA_BUFFER_END?0:2;
 }
 
-typedef struct {bool hold;size_t audio,video;} HeldBackend;
+typedef struct {bool hold,clocked;uint64_t clock;size_t audio,video;} HeldBackend;
 static MediaBackendResult held_submit(void *opaque,const MediaMp4Sample *sample,
     const unsigned char *bytes,size_t n,char *error,size_t capacity)
 {
     (void)bytes;(void)n;(void)error;(void)capacity;HeldBackend *h=opaque;
     if(sample->kind==MEDIA_MP4_TRACK_VIDEO){if(h->hold)return MEDIA_BACKEND_WOULD_BLOCK;h->video++;}
-    else h->audio++;
+    else {h->audio++;if(h->clocked)h->clock=(sample->pts+sample->duration)*1000000u/90000u;}
     return MEDIA_BACKEND_ACCEPTED;
 }
 static bool held_advance(void *opaque,uint64_t clock,char *error,size_t n)
@@ -307,4 +307,40 @@ finish:
     if(b.current)result=__LINE__;
     return result;
 #undef TRACK_CHECK
+}
+
+int hls_discontinuity_clock_test(const char *playlist,size_t np,const unsigned char *first,size_t nf,
+                               const unsigned char *second,size_t ns)
+{
+    Budget b;budget_init(&b,8u*1024u*1024u);char error[256]={0};int result=0;
+    Transport t={.first=first,.second=second,.nf=nf,.ns=ns,.slice=SIZE_MAX};
+    MediaHlsTransport transport={&t,start,poll,cancel};
+    MediaHlsPlaylist *p=media_hls_playlist_parse(&b,"https://example.ttvnw.net/live.m3u8",
+        (const unsigned char*)playlist,np,error,sizeof(error));
+    MediaHlsSource *s=p?media_hls_source_create(&b,p,&transport,error,sizeof(error)):NULL;
+    MediaPlayback *playback=NULL;
+    if(!s){result=1;goto done;}
+    for(unsigned i=0;i<10000;++i){
+        MediaHlsPrimeStatus prime=media_hls_source_prime(s,error,sizeof(error));
+        if(prime==MEDIA_HLS_PRIME_FAILED){result=2;goto done;}
+        if(prime==MEDIA_HLS_PRIME_READY)break;
+    }
+    MediaSampleSource video={0},audio={0};
+    if(!media_hls_source_track_views(s,&video,&audio)){result=3;goto done;}
+    HeldBackend h={.clocked=true};MediaBackend backend={.opaque=&h,.submit=held_submit,
+        .advance=held_advance,.destroy=held_destroy};
+    playback=media_playback_create_sources(&b,&video,&audio,&backend,NULL,error,sizeof(error));
+    if(!playback){result=4;goto done;}
+    media_playback_prime_video_source(playback,0,NULL,error,sizeof(error));
+    media_playback_prime_audio_source(playback,0,NULL,error,sizeof(error));
+    for(unsigned i=0;i<10000;++i){
+        media_hls_source_pump(s,i*16667u);
+        if(!media_playback_advance(playback,h.clock,error,sizeof(error))){result=5;goto done;}
+        if(h.audio==564&&h.video==360)break;
+    }
+    if(h.audio!=564||h.video!=360)result=6;
+done:
+    media_playback_destroy(playback);
+    if(s)media_hls_source_destroy(s);else media_hls_playlist_destroy(p);
+    return b.current?7:result;
 }

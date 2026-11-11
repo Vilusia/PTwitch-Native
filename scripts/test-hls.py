@@ -86,6 +86,7 @@ for path in [ENGINE / p for p in sources] + [ROOT / 'native/tests/hls_host.c', R
     objects.append(str(obj))
 dll = OUT / 'hls-test.dll'
 objects.append('/export:hls_track_views_test')
+objects.append('/export:hls_discontinuity_clock_test')
 P.run([str(TOOLS / 'ld.lld.exe'), '-flavor', 'link', '/dll', '/noentry', '/nodefaultlib', '/opt:ref', '/export:hls_ts_packet_test', '/export:hls_ts_packet_prepare', '/export:hls_transport_test', '/export:hls_test', '/export:ptwitch_avc_snapshot', '/export:ptwitch_test_snapshot_dir', '/export:ptwitch_state_test', '/export:hls_repeat_resume_test', '/out:' + str(dll), *objects, str(OUT / 'ucrt.lib')], check=True)
 
 class Seen(C.Structure):
@@ -231,6 +232,12 @@ if __name__ == '__main__':
     view_line=lib.hls_track_views_test(view_playlist,len(view_playlist),view_first,len(view_first),view_second,len(view_second))
     assert view_line==0, f'TS blocked-video/audio bypass failed at hls_host.c:{view_line}'
     print('PASS independent TS track views, held video lifetime, duplicate-read refusal and arena wraps')
+    lib.hls_discontinuity_clock_test.argtypes=lib.hls_track_views_test.argtypes
+    discontinuity=b'#EXTM3U\n#EXT-X-TARGETDURATION:7\n#EXTINF:7.000,\n0.mp4\n#EXT-X-DISCONTINUITY\n#EXTINF:6.000,\n1.mp4\n'
+    gap_result=lib.hls_discontinuity_clock_test(discontinuity,len(discontinuity),view_first,len(view_first),view_second,len(view_second))
+    assert gap_result==0, f'Live TS discontinuity audio-clock stall: {gap_result}'
+    print('PASS live TS discontinuity advances with audio-driven playback clock')
+
     paced_ts=run('TS batched packet delivery keeps pace',playlist=ts_playlist,
         first=ts_fragment(0,frames=70,padding_packets=12),second=ts_fragment(1,frames=70,padding_packets=12),
         slice=C.c_size_t(-1).value)

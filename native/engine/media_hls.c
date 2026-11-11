@@ -162,6 +162,7 @@ struct MediaHlsSource {
     uint64_t live_edge_since_us;
     uint64_t failed_sequence;
     uint64_t last_video_pts90k;
+    uint32_t last_video_duration90k;
     uint64_t last_audio_pts90k;
     uint32_t audio_duration90k;
     MediaMp4TrackInfo video_info;
@@ -1364,6 +1365,7 @@ static void hls_video_callback(void *opaque, const uint8_t *data,
         && pts90k - source->last_video_pts90k <= UINT32_MAX
             ? (uint32_t) (pts90k - source->last_video_pts90k) : 3600u;
     source->last_video_pts90k = pts90k;
+    source->last_video_duration90k = duration;
     (void) hls_queue_push(
         source, MEDIA_MP4_TRACK_VIDEO, MEDIA_PACKET_FORMAT_H264_ANNEX_B,
         data, length, pts90k, duration, keyframe);
@@ -1515,6 +1517,20 @@ static void hls_prepare_segment(MediaHlsSource *source, size_t segment)
         source->ts_skipped_video = 0;
         memset(source->mp4_have_dts,0,sizeof(source->mp4_have_dts));
         swdec_ts_flush(source->ts);
+        /* A live discontinuity starts a new timestamp epoch. Continue from
+           the actual emitted media tail: EXTINF can include missing media,
+           whose gap would strand audio beyond an audio-driven decode horizon. */
+        if (source->live_session && source->playlist->init_url[0] == '\0'
+            && source->last_video_duration90k != 0) {
+            uint64_t tail = source->last_video_pts90k;
+            if (UINT64_MAX - tail >= source->last_video_duration90k)
+                tail += source->last_video_duration90k;
+            uint64_t audio_tail = source->last_audio_pts90k;
+            if (UINT64_MAX - audio_tail >= source->audio_duration90k)
+                audio_tail += source->audio_duration90k;
+            if (audio_tail > tail) tail = audio_tail;
+            source->live_timeline90k = tail;
+        }
         swdec_ts_init(
             source->ts, hls_video_callback, hls_audio_callback, source);
         source->transport_tail = 0;
@@ -2158,6 +2174,7 @@ static bool hls_seek_common(void *opaque, uint64_t target_us,
     source->seek_pristine = true;
     source->seek_segment = segment;
     source->last_video_pts90k = 0;
+    source->last_video_duration90k = 0;
     source->last_audio_pts90k = 0;
     return true;
 }
